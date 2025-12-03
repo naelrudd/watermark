@@ -373,39 +373,54 @@ def main():
     evaluator = WatermarkEvaluation()
     
     for idx, ((filename, image_array), watermark_text) in enumerate(zip(images, watermark_texts), 1):
-        print(f"    [{idx:2d}] Memproses: {filename:<30} (ukuran: {image_array.shape})")
+        print(f"    [{idx:2d}] Memproses: {filename:<30} (ukuran: {image_array.shape})", flush=True)
         
         # Embedding
+        print(f"         → Embedding watermark...", end='', flush=True)
         watermarked, embedded_bits = watermarker.embed_watermark(image_array, watermark_text)
+        print(" ✓", flush=True)
+        
+        print(f"         → Extracting watermark...", end='', flush=True)
         extracted = watermarker.extract_watermark(watermarked)
+        print(" ✓", flush=True)
         
         # Imperceptibility
+        print(f"         → Calculating imperceptibility...", end='', flush=True)
         psnr = evaluator.calculate_psnr(image_array, watermarked)
         ssim_val = evaluator.calculate_ssim(image_array, watermarked)
         ncc = evaluator.calculate_ncc(image_array, watermarked)
         imperceptibility_score = (ssim_val + ncc) / 2
+        print(" ✓", flush=True)
         
         # Capacity
         capacity_percent, watermark_bits, max_bits = evaluator.calculate_capacity(image_array.shape, watermark_text)
         
         # Robustness
+        print(f"         → Testing robustness (blur)...", end='', flush=True)
         attacked_blur = evaluator.apply_gaussian_blur(watermarked, sigma=1.0)
         extracted_blur = watermarker.extract_watermark(attacked_blur)
         ber_blur = evaluator.calculate_ber(watermark_text, extracted_blur)
+        print(" ✓", flush=True)
         
+        print(f"         → Testing robustness (noise)...", end='', flush=True)
         attacked_noise = evaluator.apply_salt_pepper_noise(watermarked, density=0.01)
         extracted_noise = watermarker.extract_watermark(attacked_noise)
         ber_noise = evaluator.calculate_ber(watermark_text, extracted_noise)
+        print(" ✓", flush=True)
         
+        print(f"         → Testing robustness (brightness)...", end='', flush=True)
         attacked_brightness = evaluator.apply_brightness_change(watermarked, factor=0.9)
         extracted_brightness = watermarker.extract_watermark(attacked_brightness)
         ber_brightness = evaluator.calculate_ber(watermark_text, extracted_brightness)
+        print(" ✓", flush=True)
         
         robustness_score = 100 - ((ber_blur + ber_noise + ber_brightness) / 3)
         
         # Security
+        print(f"         → Calculating security...", end='', flush=True)
         entropy = evaluator.calculate_entropy(watermark_text)
         security_score = entropy / 8 * 100
+        print(" ✓", flush=True)
         
         # Overall
         overall_score = (imperceptibility_score * 30 + robustness_score * 30 + security_score * 40) / 100
@@ -430,9 +445,11 @@ def main():
         })
         
         # Save watermarked image
+        print(f"         → Saving watermarked image...", end='', flush=True)
         watermarked_img = Image.fromarray(watermarked)
         output_filename = f"watermarked_{os.path.splitext(filename)[0]}.png"
         watermarked_img.save(output_filename)
+        print(f" ✓ ({output_filename})\n", flush=True)
     
     # 4. Create summary
     print(f"\n[3] Membuat ringkasan hasil...\n")
