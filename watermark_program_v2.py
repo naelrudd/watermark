@@ -9,7 +9,7 @@
 # ============================================================
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageTk
 import os
 from datetime import datetime
 from skimage.metrics import structural_similarity as ssim
@@ -17,6 +17,8 @@ from scipy.ndimage import gaussian_filter
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
+import tkinter as tk
+from tkinter import filedialog, ttk, messagebox
 
 # ============================================================
 # 1. KELAS WATERMARKING - LSB METHOD
@@ -277,6 +279,161 @@ class WatermarkEvaluation:
 
 
 # ============================================================
+# 3. FUNGSI EMBED & EVALUASI UNTUK SATU GAMBAR
+# ============================================================
+
+def process_single_image(image_path, watermark_text, bit_iteration=1, output_path=None):
+    """
+    Memproses watermarking dan evaluasi untuk SATU gambar.
+    
+    Args:
+        image_path (str): path ke gambar input.
+        watermark_text (str): teks watermark.
+        bit_iteration (int): urutan ke berapa (1..10) untuk panjang bit watermark.
+                             1 -> 4 bit, 2 -> 8 bit, 3 -> 16 bit, dst (kelipatan 2).
+        output_path (str): path output gambar watermarked (opsional).
+    Returns:
+        dict: hasil metrik dan informasi penting lain.
+        np.ndarray: array gambar watermarked.
+    """
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Gambar tidak ditemukan: {image_path}")
+
+    # Baca gambar
+    img = Image.open(image_path)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    image_array = np.array(img)
+
+    # Aturan panjang bit watermark: 4, 8, 16, 32, ... sampai iterasi ke-10
+    if bit_iteration < 1:
+        bit_iteration = 1
+    if bit_iteration > 10:
+        bit_iteration = 10
+
+    # Konversi teks watermark ke bit
+    full_bytes = watermark_text.encode('utf-8')
+    full_bits = ''.join(format(b, '08b') for b in full_bytes)
+
+    target_bits = 4 * (2 ** (bit_iteration - 1))  # 4, 8, 16, 32, ...
+    # Ambil prefix bit sesuai target (kalau teks kurang panjang, pakai semua yg ada)
+    prefix_bits = full_bits[:target_bits] if len(full_bits) >= target_bits else full_bits
+
+    # Bentuk ulang watermark_text_truncated dari prefix_bits agar bisa diekstrak normal
+    truncated_bytes = bytearray()
+    for i in range(0, len(prefix_bits), 8):
+        byte_bits = prefix_bits[i:i+8]
+        if len(byte_bits) == 8:
+            truncated_bytes.append(int(byte_bits, 2))
+
+    if len(truncated_bytes) == 0:
+        watermark_text_truncated = watermark_text[:1] if watermark_text else ""
+    else:
+        watermark_text_truncated = truncated_bytes.decode('utf-8', errors='ignore')
+
+    # Embedding dengan teks hasil pemotongan sesuai aturan bit
+    watermarker = LSBWatermarking(seed=42)
+    evaluator = WatermarkEvaluation()
+
+    watermarked, embedded_bits = watermarker.embed_watermark(image_array, watermark_text_truncated)
+    extracted = watermarker.extract_watermark(watermarked)
+
+    # Imperceptibility
+    psnr = evaluator.calculate_psnr(image_array, watermarked)
+    ssim_val = evaluator.calculate_ssim(image_array, watermarked)
+    ncc = evaluator.calculate_ncc(image_array, watermarked)
+    imperceptibility_score = (ssim_val + ncc) / 2
+
+    # Capacity
+    capacity_percent, watermark_bits, max_bits = evaluator.calculate_capacity(image_array.shape, watermark_text_truncated)
+
+    # Robustness
+    attacked_blur = evaluator.apply_gaussian_blur(watermarked, sigma=1.0)
+    extracted_blur = watermarker.extract_watermark(attacked_blur)
+    ber_blur = evaluator.calculate_ber(watermark_text_truncated, extracted_blur)
+
+    attacked_noise = evaluator.apply_salt_pepper_noise(watermarked, density=0.01)
+    extracted_noise = watermarker.extract_watermark(attacked_noise)
+    ber_noise = evaluator.calculate_ber(watermark_text_truncated, extracted_noise)
+
+    attacked_brightness = evaluator.apply_brightness_change(watermarked, factor=0.9)
+    extracted_brightness = watermarker.extract_watermark(attacked_brightness)
+    ber_brightness = evaluator.calculate_ber(watermark_text_truncated, extracted_brightness)
+
+    robustness_score = 100 - ((ber_blur + ber_noise + ber_brightness) / 3)
+
+    # Security
+    entropy = evaluator.calculate_entropy(watermark_text_truncated)
+    security_score = entropy / 8 * 100
+
+    # Overall
+    overall_score = (imperceptibility_score * 30 + robustness_score * 30 + security_score * 40) / 100
+
+    # Simpan gambar watermarked
+    if output_path is None:
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        output_path = f"watermarked_{base_name}.png"
+
+    # Hapus jika sudah ada versi lama
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
+    watermarked_img = Image.fromarray(watermarked)
+    watermarked_img.save(output_path)
+
+    result = {
+        'filename': os.path.basename(image_path),
+        'watermark_text': watermark_text_truncated,
+        'original_watermark_text': watermark_text,
+        'bit_iteration': bit_iteration,
+        'target_bits_rule': target_bits,
+        'image_shape': str(image_array.shape),
+        'psnr': psnr,
+        'ssim': ssim_val,
+        'ncc': ncc,
+        'imperceptibility_score': imperceptibility_score,
+        'capacity_percent': capacity_percent,
+        'ber_blur': ber_blur,
+        'ber_noise': ber_noise,
+        'ber_brightness': ber_brightness,
+        'robustness_score': robustness_score,
+        'entropy': entropy,
+        'security_score': security_score,
+        'overall_score': overall_score,
+        'extraction_success': watermark_text == extracted,
+        'embedded_bits': embedded_bits,
+        'watermark_bits': watermark_bits,
+        'max_bits': max_bits,
+        'output_path': output_path,
+        'extracted_watermark': extracted,
+    }
+
+    return result, watermarked
+
+
+# ============================================================
+# 4. UTILITAS CETAK RINGKASAN
+# ============================================================
+
+def _print_summary(result):
+    """Cetak ringkasan hasil ke terminal (dipakai CLI atau debug)."""
+    print("\n[HASIL]")
+    print("-" * 80)
+    print(f" Gambar          : {result['filename']}")
+    print(f" Ukuran          : {result['image_shape']}")
+    print(f" PSNR            : {result['psnr']:.4f} dB")
+    print(f" SSIM            : {result['ssim']:.4f}")
+    print(f" NCC             : {result['ncc']:.4f}")
+    print(f" Capacity        : {result['capacity_percent']:.6f}%")
+    print(f" Robustness      : {result['robustness_score']:.4f}")
+    print(f" Security Score  : {result['security_score']:.4f}")
+    print(f" Overall Score   : {result['overall_score']:.4f}")
+    print(f" Extract Success : {result['extraction_success']}")
+    print(f" Output Image    : {result['output_path']}")
+    print("-" * 80 + "\n")
+
+
+# ============================================================
 # 3. FUNGSI UNTUK MEMBACA GAMBAR DARI FOLDER
 # ============================================================
 
@@ -331,161 +488,213 @@ def load_images_from_folder(folder_path):
 
 
 # ============================================================
-# 4. FUNGSI UTAMA - EVALUASI LENGKAP
+# 4. FUNGSI UTAMA (MODE CLI SEDERHANA, SATU GAMBAR)
 # ============================================================
 
-def main():
+def main_cli():
     """
-    Fungsi utama untuk menjalankan watermarking dan evaluasi
-    pada gambar dari folder 'gambar'
+    Mode terminal (opsional) untuk menjalankan watermarking dan evaluasi
+    pada SATU gambar.
     """
     print("\n" + "="*80)
-    print("PROGRAM DIGITAL IMAGE WATERMARKING - LSB METHOD")
-    print("BACA GAMBAR DARI FOLDER 'gambar'")
+    print("PROGRAM DIGITAL IMAGE WATERMARKING - LSB METHOD (SINGLE IMAGE - CLI)")
     print("="*80)
-    
-    # 1. Load images from folder
-    folder_name = "gambar"
-    print(f"\n[1] Membaca gambar dari folder '{folder_name}'...\n")
-    
-    images = load_images_from_folder(folder_name)
-    
-    if len(images) == 0:
-        print("\n⚠️  Tidak ada gambar untuk diproses!")
-        print(f"\nLangkah-langkah:")
-        print(f"1. Buat folder bernama 'gambar' di folder yang sama dengan program ini")
-        print(f"2. Masukkan gambar (JPG, PNG, BMP, GIF, TIFF) ke folder 'gambar'")
-        print(f"3. Jalankan program ini lagi")
+
+    image_path = input("Masukkan path gambar: ").strip().strip('\"')
+    watermark_text = input("Masukkan teks watermark: ").strip()
+
+    if not image_path:
+        print("⚠️  Path gambar kosong, program berhenti.")
         return
-    
-    # 2. Prepare watermarks (gunakan nama file tanpa extension sebagai watermark)
-    watermark_texts = []
-    for filename, _ in images:
-        # Ambil nama file tanpa extension
-        watermark_text = os.path.splitext(filename)[0][:20]  # Max 20 chars
-        watermark_texts.append(watermark_text)
-    
-    # 3. Process watermarking
-    print(f"[2] Memproses watermarking pada {len(images)} gambar...\n")
-    
-    results = []
-    watermarker = LSBWatermarking(seed=42)
-    evaluator = WatermarkEvaluation()
-    
-    for idx, ((filename, image_array), watermark_text) in enumerate(zip(images, watermark_texts), 1):
-        print(f"    [{idx:2d}] Memproses: {filename:<30} (ukuran: {image_array.shape})", flush=True)
-        
-        # Embedding
-        print(f"         → Embedding watermark...", end='', flush=True)
-        watermarked, embedded_bits = watermarker.embed_watermark(image_array, watermark_text)
-        print(" ✓", flush=True)
-        
-        print(f"         → Extracting watermark...", end='', flush=True)
-        extracted = watermarker.extract_watermark(watermarked)
-        print(" ✓", flush=True)
-        
-        # Imperceptibility
-        print(f"         → Calculating imperceptibility...", end='', flush=True)
-        psnr = evaluator.calculate_psnr(image_array, watermarked)
-        ssim_val = evaluator.calculate_ssim(image_array, watermarked)
-        ncc = evaluator.calculate_ncc(image_array, watermarked)
-        imperceptibility_score = (ssim_val + ncc) / 2
-        print(" ✓", flush=True)
-        
-        # Capacity
-        capacity_percent, watermark_bits, max_bits = evaluator.calculate_capacity(image_array.shape, watermark_text)
-        
-        # Robustness
-        print(f"         → Testing robustness (blur)...", end='', flush=True)
-        attacked_blur = evaluator.apply_gaussian_blur(watermarked, sigma=1.0)
-        extracted_blur = watermarker.extract_watermark(attacked_blur)
-        ber_blur = evaluator.calculate_ber(watermark_text, extracted_blur)
-        print(" ✓", flush=True)
-        
-        print(f"         → Testing robustness (noise)...", end='', flush=True)
-        attacked_noise = evaluator.apply_salt_pepper_noise(watermarked, density=0.01)
-        extracted_noise = watermarker.extract_watermark(attacked_noise)
-        ber_noise = evaluator.calculate_ber(watermark_text, extracted_noise)
-        print(" ✓", flush=True)
-        
-        print(f"         → Testing robustness (brightness)...", end='', flush=True)
-        attacked_brightness = evaluator.apply_brightness_change(watermarked, factor=0.9)
-        extracted_brightness = watermarker.extract_watermark(attacked_brightness)
-        ber_brightness = evaluator.calculate_ber(watermark_text, extracted_brightness)
-        print(" ✓", flush=True)
-        
-        robustness_score = 100 - ((ber_blur + ber_noise + ber_brightness) / 3)
-        
-        # Security
-        print(f"         → Calculating security...", end='', flush=True)
-        entropy = evaluator.calculate_entropy(watermark_text)
-        security_score = entropy / 8 * 100
-        print(" ✓", flush=True)
-        
-        # Overall
-        overall_score = (imperceptibility_score * 30 + robustness_score * 30 + security_score * 40) / 100
-        
-        results.append({
-            'filename': filename,
-            'watermark_text': watermark_text,
-            'image_shape': str(image_array.shape),
-            'psnr': psnr,
-            'ssim': ssim_val,
-            'ncc': ncc,
-            'imperceptibility_score': imperceptibility_score,
-            'capacity_percent': capacity_percent,
-            'ber_blur': ber_blur,
-            'ber_noise': ber_noise,
-            'ber_brightness': ber_brightness,
-            'robustness_score': robustness_score,
-            'entropy': entropy,
-            'security_score': security_score,
-            'overall_score': overall_score,
-            'extraction_success': watermark_text == extracted
-        })
-        
-        # Save watermarked image
-        print(f"         → Saving watermarked image...", end='', flush=True)
-        watermarked_img = Image.fromarray(watermarked)
-        output_filename = f"watermarked_{os.path.splitext(filename)[0]}.png"
-        watermarked_img.save(output_filename)
-        print(f" ✓ ({output_filename})\n", flush=True)
-    
-    # 4. Create summary
-    print(f"\n[3] Membuat ringkasan hasil...\n")
-    
-    df_results = pd.DataFrame(results)
-    
-    print("    "+"-"*80)
-    print("    RINGKASAN STATISTIK")
-    print("    "+"-"*80)
-    print(f"    Imperceptibility (Avg PSNR): {df_results['psnr'].mean():.4f} dB")
-    print(f"    Imperceptibility (Avg SSIM): {df_results['ssim'].mean():.4f}")
-    print(f"    Capacity (Rata-rata): {df_results['capacity_percent'].mean():.6f}%")
-    print(f"    Robustness Score: {df_results['robustness_score'].mean():.4f}")
-    print(f"    Security Score: {df_results['security_score'].mean():.4f}")
-    print(f"    ★ OVERALL SCORE: {df_results['overall_score'].mean():.4f}/100")
-    print("    "+"-"*80)
-    
-    # 5. Save results
-    csv_filename = 'watermark_evaluation_results.csv'
-    df_results.to_csv(csv_filename, index=False)
-    print(f"\n[4] Hasil telah disimpan:")
-    print(f"    - CSV: {csv_filename}")
-    print(f"    - Gambar watermarked: watermarked_*.png\n")
-    
-    print("="*80)
-    print("✓ EVALUASI SELESAI - Program berhasil dijalankan!")
-    print("="*80 + "\n")
-    
-    # Tampilkan detail per gambar
-    print("DETAIL HASIL PER GAMBAR:")
-    print("-"*80)
-    print(df_results[['filename', 'psnr', 'robustness_score', 'security_score', 'overall_score']].to_string(index=False))
-    print()
-    
-    return df_results
+    if watermark_text == "":
+        print("⚠️  Teks watermark kosong, program berhenti.")
+        return
+
+    try:
+        # Default iterasi ke-1 (4 bit) untuk mode CLI
+        result, _ = process_single_image(image_path, watermark_text, bit_iteration=1)
+    except Exception as e:
+        print(f"❌ Terjadi error: {e}")
+        return
+
+    _print_summary(result)
+
+
+# ============================================================
+# 5. GUI UNTUK UPLOAD GAMBAR & PREVIEW WATERMARK
+# ============================================================
+
+class WatermarkGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Watermark Program 2 - Single Image LSB")
+        self.root.geometry("980x620")
+
+        # Hapus file watermarked lama di folder kerja
+        self._cleanup_old_watermarked()
+
+        self.image_path = None
+        self.preview_original = None
+        self.preview_watermarked = None
+
+        self._build_widgets()
+
+    def _cleanup_old_watermarked(self):
+        """Hapus file yang diawali 'watermarked_' di folder saat ini."""
+        cwd = os.getcwd()
+        for fname in os.listdir(cwd):
+            if fname.lower().startswith("watermarked_"):
+                try:
+                    os.remove(os.path.join(cwd, fname))
+                except Exception:
+                    pass
+
+    def _build_widgets(self):
+        # Frame atas: kontrol
+        top = tk.Frame(self.root, pady=8, padx=8)
+        top.pack(side=tk.TOP, fill=tk.X)
+
+        btn_select = tk.Button(top, text="Pilih Gambar...", command=self.select_image)
+        btn_select.grid(row=0, column=0, padx=4, pady=4, sticky="w")
+
+        self.lbl_image = tk.Label(top, text="Belum ada gambar yang dipilih")
+        self.lbl_image.grid(row=0, column=1, padx=4, pady=4, sticky="w")
+
+        tk.Label(top, text="Teks Watermark:").grid(row=1, column=0, padx=4, pady=4, sticky="w")
+        self.entry_text = tk.Entry(top, width=50)
+        self.entry_text.grid(row=1, column=1, padx=4, pady=4, sticky="w")
+
+        tk.Label(top, text="Iterasi Bit (4,8,16,32,...):").grid(row=2, column=0, padx=4, pady=4, sticky="w")
+        self.bit_var = tk.StringVar(value="1 - 4 bit")
+        options = [f"{i} - {4 * (2 ** (i - 1))} bit" for i in range(1, 11)]
+        self.combo_bits = ttk.Combobox(top, textvariable=self.bit_var, values=options, width=20, state="readonly")
+        self.combo_bits.grid(row=2, column=1, padx=4, pady=4, sticky="w")
+
+        btn_process = tk.Button(top, text="Proses Watermark", command=self.process)
+        btn_process.grid(row=3, column=0, padx=4, pady=8, sticky="w")
+
+        # Frame tengah: info hasil
+        mid = tk.Frame(self.root, padx=8, pady=4)
+        mid.pack(side=tk.TOP, fill=tk.X)
+
+        self.text_info = tk.Text(mid, height=6, width=120)
+        self.text_info.pack(fill=tk.X)
+        self.text_info.configure(state="disabled")
+
+        # Frame bawah: preview gambar
+        bottom = tk.Frame(self.root, padx=8, pady=8)
+        bottom.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        left = tk.Frame(bottom)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right = tk.Frame(bottom)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="Gambar Asli").pack()
+        self.lbl_preview_original = tk.Label(left, bg="#e0e0e0")
+        self.lbl_preview_original.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        tk.Label(right, text="Gambar Watermarked").pack()
+        self.lbl_preview_watermarked = tk.Label(right, bg="#e0e0e0")
+        self.lbl_preview_watermarked.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+    def select_image(self):
+        path = filedialog.askopenfilename(
+            title="Pilih gambar",
+            filetypes=(
+                ("Image files", "*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.tiff"),
+                ("All files", "*.*"),
+            ),
+        )
+        if not path:
+            return
+        self.image_path = path
+        self.lbl_image.config(text=os.path.basename(path))
+        self._show_original_preview(path)
+
+    def _show_original_preview(self, path):
+        try:
+            img = Image.open(path)
+            img = img.convert("RGB")
+            img = self._resize_for_preview(img)
+            self.preview_original = ImageTk.PhotoImage(img)
+            self.lbl_preview_original.config(image=self.preview_original)
+        except Exception as e:
+            messagebox.showerror("Error", f"Gagal memuat gambar asli:\n{e}")
+
+    def _show_watermarked_preview(self, path):
+        try:
+            img = Image.open(path)
+            img = img.convert("RGB")
+            img = self._resize_for_preview(img)
+            self.preview_watermarked = ImageTk.PhotoImage(img)
+            self.lbl_preview_watermarked.config(image=self.preview_watermarked)
+        except Exception as e:
+            messagebox.showerror("Error", f"Gagal memuat gambar watermarked:\n{e}")
+
+    @staticmethod
+    def _resize_for_preview(img, max_size=(420, 320)):
+        img.thumbnail(max_size, Image.LANCZOS)
+        return img
+
+    def process(self):
+        if not self.image_path:
+            messagebox.showwarning("Peringatan", "Silakan pilih gambar terlebih dahulu.")
+            return
+
+        text = self.entry_text.get().strip()
+        if not text:
+            messagebox.showwarning("Peringatan", "Silakan isi teks watermark.")
+            return
+
+        try:
+            iter_str = self.bit_var.get().split(" - ")[0].strip()
+            bit_iteration = int(iter_str)
+        except Exception:
+            bit_iteration = 1
+
+        try:
+            result, _ = process_single_image(self.image_path, text, bit_iteration=bit_iteration)
+        except Exception as e:
+            messagebox.showerror("Error", f"Terjadi kesalahan saat proses watermark:\n{e}")
+            return
+
+        # Tampilkan info hasil
+        info_lines = [
+            f"Gambar              : {result['filename']}",
+            f"Ukuran              : {result['image_shape']}",
+            f"Original Text       : {result.get('original_watermark_text', '')}",
+            f"Watermark Dipakai   : {result['watermark_text']}",
+            f"Iterasi Bit         : {result.get('bit_iteration', '-')}",
+            f"Target Bits (aturan): {result.get('target_bits_rule', '-')}",
+            f"PSNR                : {result['psnr']:.4f} dB",
+            f"SSIM                : {result['ssim']:.4f}",
+            f"NCC                 : {result['ncc']:.4f}",
+            f"Capacity            : {result['capacity_percent']:.6f}%",
+            f"Robustness Score    : {result['robustness_score']:.4f}",
+            f"Security Score      : {result['security_score']:.4f}",
+            f"Overall Score       : {result['overall_score']:.4f}",
+            f"Extract Success     : {result['extraction_success']}",
+            f"Output Image        : {result['output_path']}",
+        ]
+
+        self.text_info.configure(state="normal")
+        self.text_info.delete("1.0", tk.END)
+        self.text_info.insert(tk.END, "\n".join(info_lines))
+        self.text_info.configure(state="disabled")
+
+        # Preview gambar watermarked
+        self._show_watermarked_preview(result['output_path'])
+
+
+def main_gui():
+    root = tk.Tk()
+    app = WatermarkGUI(root)
+    root.mainloop()
+
+
 
 
 if __name__ == "__main__":
-    results_df = main()
+    # Jalankan GUI sebagai default
+    main_gui()
