@@ -1,4 +1,4 @@
-@REM run2.bat - Setup venv, install requirements, dan run aplikasi
+@REM run.bat - Setup venv, install requirements, dan run aplikasi
 
 @echo off
 setlocal enabledelayedexpansion
